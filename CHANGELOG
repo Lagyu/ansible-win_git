@@ -1,3 +1,7 @@
+20200226:
+  - Added "key_file" option to specify private key
+  - Rewrited to use "Ansible.Basic" module to manage with AWX or Ansible Tower.
+
 20190305:
 
   - Added "recursive" option for clone (tivrobo)

@@ -2,39 +2,53 @@
 
 # GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
 
-# Anatoliy Ivashina <tivrobo@gmail.com>
-# Pablo Estigarribia <pablodav@gmail.com>
-# Michael Hay <project.hay@gmail.com>
+# Copyright: (c) 2020, Yuya Sasaki <sasaki.y@ruri.waseda.jp>
+# Original authors: Anatoliy Ivashina <tivrobo@gmail.com>, Pablo Estigarribia <pablodav@gmail.com>, Michael Hay <project.hay@gmail.com>
 
-#Requires -Module Ansible.ModuleUtils.Legacy.psm1
 
-$params = Parse-Args -arguments $args -supports_check_mode $true
-$check_mode = Get-AnsibleParam -obj $params -name "_ansible_check_mode" -default $false
+#AnsibleRequires -CSharpUtil Ansible.Basic
 
-# Module Params
-$repo = Get-AnsibleParam -obj $params -name "repo" -failifempty $true -aliases "name"
-$dest = Get-AnsibleParam -obj $params -name "dest"
-$branch = Get-AnsibleParam -obj $params -name "branch" -default "master"
-$clone = ConvertTo-Bool (Get-AnsibleParam -obj $params -name "clone" -default $true)
-$update = ConvertTo-Bool (Get-AnsibleParam -obj $params -name "update" -default $false)
-$recursive = ConvertTo-Bool (Get-AnsibleParam -obj $params -name "recursive" -default $true)
-$replace_dest = ConvertTo-Bool (Get-AnsibleParam -obj $params -name "replace_dest" -default $false)
-$accept_hostkey = ConvertTo-Bool (Get-AnsibleParam -obj $params -name "accept_hostkey" -default $false)
-
-$result = New-Object psobject @{
-    win_git = New-Object psobject @{
-        repo           = $null
-        dest           = $null
-        clone          = $false
-        replace_dest   = $true
-        accept_hostkey = $true
-        update         = $false
-        recursive      = $true
-        branch         = "master"
+$spec = @{
+    options = @{
+        repo = @{ type = "str"; required = $true }
+        dest = @{ type = "str"; required = $true }
+        branch = @{ type = "str"; default = "master" }
+        clone = @{ type = "str" }
+        update = @{ type = "str" }
+        recursive = @{ type = "str" }
+        replace_dest = @{ type = "str" }
+        accept_hostkey = @{ type = "str" }
+        key_file = @{ type = "str" }
     }
-    changed = $false
-    cmd_msg = $null
+    supports_check_mode = $true
 }
+
+$module = [Ansible.Basic.AnsibleModule]::Create($args, $spec)
+
+$repo  = $module.Params.repo
+$dest  = $module.Params.dest
+$branch = $module.Params.branch
+$clone  = $module.Params.clone
+$update = $module.Params.update
+$recursive = $module.Params.recursive
+$replace_dest = $module.Params.replace_dest
+$accept_hostkey = $module.Params.accept_hostkey
+$key_file = $module.Params.key_file
+
+$module.Result.win_git = @{
+    repo           = $null
+    dest           = $null
+    clone          = $false
+    replace_dest   = $true
+    accept_hostkey = $true
+    update         = $false
+    recursive      = $true
+    branch         = "master"
+    key_file       = $null
+    ssh_command    = $null
+}
+$module.Result.changed = $false
+$module.Result.cmd_msg = $null
 
 # Add Git to PATH variable
 # Test with git 2.14
@@ -68,7 +82,7 @@ function FindGit {
     if ($a -ne $null) {
         return $a
     }
-    Fail-Json -obj $result -message "git.exe is not installed. It must be installed (use chocolatey)"
+    $module.FailJson("git.exe is not installed. It must be installed (use chocolatey)")
 }
 
 # Remove dest if it exests
@@ -78,12 +92,12 @@ function PrepareDestination {
     if ((Test-Path $dest) -And (-Not $check_mode)) {
         try {
             Remove-Item $dest -Force -Recurse | Out-Null
-            Set-Attr $result "cmd_msg" "Successfully removed dir $dest."
-            Set-Attr $result "changed" $true
+            $module.Result.cmd_msg = "Successfully removed dir $dest."
+            $module.Result.changed = $true
         }
         catch {
             $ErrorMessage = $_.Exception.Message
-            Fail-Json $result "Error removing $dest! Msg: $ErrorMessage"
+            $module.FailJson("Error removing $dest! Msg: $ErrorMessage")
         }
     }
 }
@@ -94,22 +108,20 @@ function CheckSshKnownHosts {
     param()
     # Get the Git Hostrepo
     $gitServer = $($repo -replace "^(\w+)\@([\w-_\.]+)\:(.*)$", '$2')
-    & cmd /c ssh-keygen.exe -F $gitServer | Out-Null
-    $rc = $LASTEXITCODE
+    ssh-keygen -F $gitServer
+}
 
-    if ($rc -ne 0) {
-        # Host is unknown
-        if ($accept_hostkey) {
-            # workaroung for disable BOM
-            # https://github.com/tivrobo/ansible-win_git/issues/7
-            $sshHostKey = & cmd /c ssh-keyscan.exe -t ecdsa-sha2-nistp256 $gitServer
-            $sshHostKey += "`n"
-            $sshKnownHostsPath = Join-Path -Path $env:Userprofile -ChildPath \.ssh\known_hosts
-            [System.IO.File]::AppendAllText($sshKnownHostsPath, $sshHostKey, $(New-Object System.Text.UTF8Encoding $False))
-        }
-        else {
-            Fail-Json -obj $result -message  "Host is not known!"
-        }
+function AddToKnownHosts {
+    [CmdletBinding()]
+    param()
+    # Get the Git Hostrepo
+    $gitServer = $($repo -replace "^(\w+)\@([\w-_\.]+)\:(.*)$", '$2')
+    if ($accept_hostkey) {
+        $known_hosts_file_path = $env:USERPROFILE + "\.ssh\known_hosts"
+        Start-Process -FilePath "cmd" -ArgumentList "/c", "ssh-keyscan", "-t", "ssh-rsa", $gitServer, ">>", $known_hosts_file_path -Wait
+    }
+    else {
+        $module.FailJson("Host is not registered in known_host file!")
     }
 }
 
@@ -117,10 +129,39 @@ function CheckSshIdentity {
     [CmdletBinding()]
     param()
 
-    & cmd /c git.exe ls-remote $repo | Out-Null
-    $rc = $LASTEXITCODE
+    $gitServer = $($repo -replace "^(\w+)\@([\w-_\.]+)\:(.*)$", '$2')
+    try {
+        git.exe ls-remote $repo | Out-Null
+        $rc = $LASTEXITCODE
+    }
+    catch {
+        $rc = $LASTEXITCODE
+    }
     if ($rc -ne 0) {
-        Fail-Json -obj $result -message  "Something wrong with connection!"
+        if ($null -ne $key_file) {
+            if ([System.IO.File]::Exists($key_file)) {
+                $env:GIT_SSH_COMMAND='ssh -o IdentitiesOnly=yes -i "' + $key_file + '"'
+                $module.Result.win_git.key_file = $key_file
+                $module.Result.win_git.ssh_command = $env:GIT_SSH_COMMAND
+            }
+            else {
+                $module.Result.win_git.key_file = "Error: File not found."
+                $module.FailJson("No such private key file: " + $key_file)
+            }
+        }
+        else {
+            $module.FailJson("You don't have access to repo. Please setup ssh key or specify the path to key_file parameter.(there may be other problems)")
+        }
+        try {
+            git.exe ls-remote $repo | Out-Null
+            $rc = $LASTEXITCODE
+        }
+        catch {
+            $rc = $LASTEXITCODE
+        }
+        if ($rc -ne 0) {
+            $module.FailJson("You don't have access to repo, even with the key specified! (there may be other problems)")
+        }
     }
 }
 
@@ -139,7 +180,7 @@ function get_version {
     $git_cmd_output = ""
 
     [hashtable]$Return = @{}
-    Set-Location $dest; &git $git_opts | Tee-Object -Variable git_cmd_output | Out-Null
+    Set-Location $dest; git $git_opts | Tee-Object -Variable git_cmd_output | Out-Null
     $Return.rc = $LASTEXITCODE
     $Return.git_output = $git_cmd_output
 
@@ -156,15 +197,15 @@ function checkout {
     $git_opts += "--no-pager"
     $git_opts += "checkout"
     $git_opts += "$branch"
-    Set-Location $dest; &git $git_opts | Tee-Object -Variable local_git_output | Out-Null
+    Set-Location $dest; git $git_opts | Tee-Object -Variable local_git_output | Out-Null
 
     $Return.git_output = $local_git_output
-    Set-Location $dest; &git status --short --branch | Tee-Object -Variable branch_status | Out-Null
+    Set-Location $dest; git status --short --branch | Tee-Object -Variable branch_status | Out-Null
     $branch_status = $branch_status.split("/")[1]
-    Set-Attr $result.win_git "branch_status" "$branch_status"
+    $module.Result.win_git.branch_status = "$branch_status"
 
     if ( $branch_status -ne "$branch" ) {
-        Fail-Json $result "Failed to checkout to $branch"
+        $module.FailJson("Failed to checkout to $branch")
     }
 
     return $Return
@@ -175,7 +216,7 @@ function clone {
     [CmdletBinding()]
     param()
 
-    Set-Attr $result.win_git "method" "clone"
+    $module.Result.win_git.method = "clone"
     [hashtable]$Return = @{}
     $local_git_output = ""
 
@@ -190,31 +231,36 @@ function clone {
         $git_opts += "--recursive"
     }
 
-    Set-Attr $result.win_git "git_opts" "$git_opts"
+    $module.Result.win_git.git_opts = "$git_opts"
 
     #Only clone if $dest does not exist and not in check mode
     if ( (-Not (Test-Path -Path $dest)) -And (-Not $check_mode)) {
-        &git $git_opts | Tee-Object -Variable local_git_output | Out-Null
-        $Return.rc = $LASTEXITCODE
+        try {
+            git $git_opts
+            $Return.rc = $LASTEXITCODE
+        }
+        catch {
+            $Return.rc = $LASTEXITCODE
+        }
         $Return.git_output = $local_git_output
-        Set-Attr $result "cmd_msg" "Successfully cloned $repo into $dest."
-        Set-Attr $result "changed" $true
-        Set-Attr $result.win_git "return_code" $LASTEXITCODE
-        Set-Attr $result.win_git "git_output" $local_git_output
+        $module.Result.cmd_msg = "Successfully cloned $repo into $dest."
+        $module.Result.changed = $true
+        $module.Result.win_git.return_code = $LASTEXITCODE
+        $module.Result.win_git.git_output = $local_git_output
     }
     else {
         $Return.rc = 0
         $Return.git_output = $local_git_output
-        Set-Attr $result "cmd_msg" "Skipping Clone of $repo becuase $dest already exists"
+        $module.Result.cmd_msg = "Skipping Clone of $repo becuase $dest already exists"
     }
 
     # Check if branch is the correct one
-    Set-Location $dest; &git status --short --branch | Tee-Object -Variable branch_status | Out-Null
+    Set-Location $dest; git status --short --branch | Tee-Object -Variable branch_status | Out-Null
     $branch_status = $branch_status.split("/")[1]
-    Set-Attr $result.win_git "branch_status" "$branch_status"
+    $module.Result.win_git.branch_status = "$branch_status"
 
     if ( $branch_status -ne "$branch" ) {
-        Fail-Json $result "Branch $branch_status is not $branch"
+        $module.FailJson("Branch $branch_status is not $branch")
     }
 
     return $Return
@@ -225,7 +271,7 @@ function update {
     [CmdletBinding()]
     param()
 
-    Set-Attr $result.win_git "method" "pull"
+    $module.Result.win_git.method = "pull"
     [hashtable]$Return = @{}
     $git_output = ""
 
@@ -236,25 +282,34 @@ function update {
     $git_opts += "origin"
     $git_opts += "$branch"
 
-    Set-Attr $result.win_git "git_opts" "$git_opts"
+    $module.Result.win_git.git_opts = "$git_opts"
     #Only update if $dest does exist and not in check mode
     if ((Test-Path -Path $dest) -and (-Not $check_mode)) {
+        
+        $current_brunch = git symbolic-ref --short HEAD
+        if ($current_brunch -ne $branch) {
         # move into correct branch before pull
         checkout
+        }
         # perform git pull
-        Set-Location $dest; &git $git_opts | Tee-Object -Variable git_output | Out-Null
-        $Return.rc = $LASTEXITCODE
-        $Return.git_output = $git_output
-        Set-Attr $result "cmd_msg" "Successfully updated $repo to $branch."
-        #TODO: handle correct status change when using update
-        Set-Attr $result "changed" $true
-        Set-Attr $result.win_git "return_code" $LASTEXITCODE
-        Set-Attr $result.win_git "git_output" $git_output
+        try {        
+            Set-Location $dest; git $git_opts | Tee-Object -Variable git_output | Out-Null    
+            $Return.rc = $LASTEXITCODE
+            $Return.git_output = $git_output
+            $module.Result.cmd_msg = "Successfully updated $repo to $branch."
+            #TODO: handle correct status change when using update
+            $module.Result.changed = $true
+            $module.Result.win_git.return_code = $LASTEXITCODE
+            $module.Result.win_git.git_output = $git_output
+        }
+        catch {
+            # pass
+        }
     }
     else {
         $Return.rc = 0
         $Return.git_output = $local_git_output
-        Set-Attr $result "cmd_msg" "Skipping update of $repo"
+        $module.Result.cmd_msg = "Skipping update of $repo"
     }
 
     return $Return
@@ -262,19 +317,21 @@ function update {
 
 
 if ($repo -eq ($null -or "")) {
-    Fail-Json $result "Repository cannot be empty or `$null"
+    $module.FailJson("Repository cannot be empty or `$null")
 }
-Set-Attr $result.win_git "repo" $repo
-Set-Attr $result.win_git "dest" $dest
+$module.Result.win_git.repo = $repo
+$module.Result.win_git.dest = $dest
 
-Set-Attr $result.win_git "replace_dest" $replace_dest
-Set-Attr $result.win_git "accept_hostkey" $accept_hostkey
-Set-Attr $result.win_git "update" $update
-Set-Attr $result.win_git "branch" $branch
+$module.Result.win_git.replace_dest = $replace_dest
+$module.Result.win_git.accept_hostkey = $accept_hostkey
+$module.Result.win_git.update = $update
+$module.Result.win_git.branch = $branch
 
 
 $git_output = ""
 $rc = 0
+
+# main starts
 
 try {
 
@@ -286,14 +343,29 @@ try {
     if ([system.uri]::IsWellFormedUriString($repo, [System.UriKind]::Absolute)) {
         # http/https repositories doesn't need Ssh handle
         # fix to avoid wrong usage of CheckSshKnownHosts CheckSshIdentity for http/https
-        Set-Attr $result.win_git "valid_url" "$repo is valid url"
+        $module.Result.win_git.valid_url = "$repo is valid url"
     }
     else {
-        CheckSshKnownHosts
-        CheckSshIdentity
+        try {
+            CheckSshKnownHosts
+        }
+        catch {
+            AddToKnownHosts
+        }
+        try {
+            CheckSshIdentity
+        }
+        catch {
+            $module.FailJson("Error while CheckSshIdentity process on cloning $repo to $dest! Msg: $ErrorMessage - $git_output", $_)
+        }
     }
-    if ($clone) {
-        clone
+    try {
+        if ($clone) {
+            clone
+        }
+    }
+    catch {
+        $module.FailJson("Error while clone process on cloning $repo to $dest! Msg: $ErrorMessage - $git_output", $_)
     }
     if ($update) {
         update
@@ -301,10 +373,12 @@ try {
 }
 catch {
     $ErrorMessage = $_.Exception.Message
-    Fail-Json $result "Error cloning $repo to $dest! Msg: $ErrorMessage - $git_output"
+    $module.FailJson("Error cloning $repo to $dest! Msg: $ErrorMessage - $git_output", $_)
 }
 
-Set-Attr $result.win_git "msg" $cmd_msg
-Set-Attr $result.win_git "changed" $changed
+$module.Result.win_git.msg = $cmd_msg
+$module.Result.win_git.changed = $changed
 
-Exit-Json $result
+$module.ExitJson()
+
+
