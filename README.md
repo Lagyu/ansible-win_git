@@ -15,8 +15,8 @@ Copy ***win_git.ps1*** and ***win_git.py*** files to **[default-module-path](htt
 ```
 - name: git clone cool-thing
   win_git:
-    repo: "git@github.com:lagyu/Ansible-win_git.git"
-    dest: "{{ ansible_env.TEMP }}\\Ansible-win_git"
+    repo: "git@github.com:Lagyu/ansible-win_git.git"
+    dest: "{{ ansible_env.TEMP }}\\ansible-win_git"
     branch: master
     update: no
     recursive: yes
@@ -34,9 +34,9 @@ ok: [windows2008r2.example.com] => {
   "win_git": {
     "accept_hostkey": true, 
     "changed": true, 
-    "dest": "C:\\Users\\tivrobo\\AppData\\Local\\Temp\\Ansible-win_git", 
-    "msg": "Successfully cloned git@github.com:tivrobo/Ansible-win_git.git into C:\\Users\\tivrobo\\AppData\\Local\\Temp\\Ansible-win_git.", 
-    "repo": "git@github.com:tivrobo/Ansible-win_git.git",
+    "dest": "C:\\Users\\MyUser\\AppData\\Local\\Temp\\ansible-win_git", 
+    "msg": "Successfully cloned git@github.com:Lagyu/ansible-win_git.git into C:\\Users\\MyUser\\AppData\\Local\\Temp\\ansible-win_git.", 
+    "repo": "git@github.com:Lagyu/ansible-win_git.git",
     "output": "", 
     "recursive": true, 
     "replace_dest": false, 
